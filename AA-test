@@ -39,10 +39,10 @@ import numpy as np
 
 # Данные находятся в Clickhouse. Подключаемся к ней и импортируем данные
 
-connection = {'host': 'http://clickhouse.beslan.pro:8080',
-                      'database':'simulator',
-                      'user':'student', 
-                      'password':'dpo_python_2020'
+connection = {'host': ' ',
+                      'database':' ',
+                      'user':' ', 
+                      'password':' '
                      }
 
 q = """
@@ -51,7 +51,7 @@ SELECT exp_group,
     sum(action = 'like') as likes,
     sum(action = 'view') as views,
     likes/views as ctr
-FROM simulator_20221020.feed_actions 
+FROM feed_actions 
 WHERE toDate(time) between '2022-09-26' and '2022-10-02'
     and exp_group in (2,3)
 GROUP BY exp_group, user_id
