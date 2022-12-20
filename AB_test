@@ -1,0 +1,215 @@
+"""Постановка задачи и гипотезы
+
+Проанализируем результаты эксперимента, который был проведен вместе с командой дата сайентистов. Эксперимент проходил с 2022-11-02 по 2022-11-08 включительно. Для эксперимента были задействованы группы 1 и 2. В группе 2 был использован один из новых алгоритмов рекомендации постов, группа 1 использовалась в качестве контроля.
+
+Нулевая гипотеза заключается в том, что CTR в группах 1 и 2 будут примерно равны. Альтернативная гипотеза заключается в том, что новый алгоритм в группе 2 приведет к увеличению CTR.
+
+План проведения A/B теста:
+
+Сравним CTR в группах 1 и 2, используя следующие методы: t-тест, тест Манна-Уитни, Пуассоновский бутстреп, t-тест на сглаженном ctr (α=5), а также t-тест и тест Манна-Уитни поверх бакетного преобразования.
+Сравним результаты каждого метода друг с другом. Посмотрим на распределения нашей величины.
+Сделаем выводы на основе полученных результатов.
+
+Подготовительная часть"""
+
+#Импортируем нужные библиотеки. Забираем данные из Clickhouse
+import pandas as pd
+import pandahouse as ph
+import datetime as dt
+import seaborn as sns
+import numpy as np
+from scipy import stats
+
+connection = {"host": "https://clickhouse.lab.karpov.courses",
+             "database": "simulator_20221120",
+             "user": "student",
+             "password": "dpo_python_2020"}
+
+query = '''
+SELECT exp_group, 
+    user_id,
+    sum(action = 'like') as likes,
+    sum(action = 'view') as views,
+    likes/views as ctr
+FROM {db}.feed_actions 
+WHERE toDate(time) between '2022-11-02' and '2022-11-08'
+    and exp_group in (2,1)
+GROUP BY exp_group, user_id
+'''
+
+df = ph.read_clickhouse(query, connection=connection)
+df.head()
+
+df.groupby('exp_group')['ctr'].agg(['mean', 'median', 'count', 'sum'])
+
+#Выборки примерно равны. Посмотрим, как распределены CTR:
+groups = sns.histplot(data = df, 
+              x='ctr', 
+              hue='exp_group', 
+              palette = ['r', 'b'],
+              alpha=0.5,
+              kde=False)
+              
+"""Вывод: в группе 1 распределение похоже на нормальное, в группе 2 мы видим бимодальное распределение с заметными выбросами. 
+В данной ситуации классический t-test не дает статистически значимых результатов, однако все же посмотрим на его результат."""
+
+#Исследовательская часть
+
+#t-test
+
+stats.ttest_ind(df[df.exp_group == 1].ctr,
+               df[df.exp_group == 2].ctr,
+               equal_var=False)
+#Ttest_indResult(statistic=0.7094392041270485, pvalue=0.4780623130874935)
+
+#Вывод: p-value > 0.05. Мы не можем отклонить нулевую гипотезу (средние CTR групп 1 и 2 равны)
+
+#Тест Манна-Уитни
+
+stats.mannwhitneyu(df[df.exp_group == 1].ctr,
+               df[df.exp_group == 2].ctr)
+#MannwhitneyuResult(statistic=56601260.5, pvalue=6.0376484617779035e-56)
+
+#Тест Манна-Уитни показывает статистически значимые отличия, т.е. значения CTR в группах отличаются, если мы сравниваем CTR попарно. P(X > Y) ≠ P(X < Y). 
+#Определим, в какой группе значения в большинстве случаев выше. Выборка A - контроль, выборка B - тест.
+
+A_gt_B = 0
+for _ in range(10000):
+    A_gt_B += df[df.exp_group == 1].ctr.sample().values[0] > df[df.exp_group == 2].ctr.sample().values[0]
+    
+print('В', A_gt_B/100, '% случаев A > B.')
+#В 55.99 % случаев A > B.
+
+"""Вывод: Примерно в 56 % случаев CTR контрольной выборки больше CTR тестовой выборки. 
+Поскольку нормальность распределения для теста Манна-Уитни не имеет значения, делаем вывод: 
+новый алгоритм рекомендаций постов не привел к увеличению CTR, но наоборот, уменьшил данную метрику."""
+
+#Пуассоновский бутстреп
+# функция, реализующая Пуассоновский бутстреп
+def bootstrap(likes1, views1, likes2, views2, n_bootstrap=2000):
+
+    poisson_bootstraps1 = stats.poisson(1).rvs(
+        (n_bootstrap, len(likes1))).astype(np.int64)
+
+    poisson_bootstraps2 = stats.poisson(1).rvs(
+            (n_bootstrap, len(likes2))).astype(np.int64)
+    
+    globalCTR1 = (poisson_bootstraps1*likes1).sum(axis=1)/(poisson_bootstraps1*views1).sum(axis=1)
+    
+    globalCTR2 = (poisson_bootstraps2*likes2).sum(axis=1)/(poisson_bootstraps2*views2).sum(axis=1)
+
+    return globalCTR1, globalCTR2
+    
+# выведем необходимые данные для использовании в функции, рассчитаем ctr, построим график
+likes1 = df[df.exp_group == 1].likes.to_numpy()
+views1 = df[df.exp_group == 1].views.to_numpy()
+likes2 = df[df.exp_group == 2].likes.to_numpy()
+views2 = df[df.exp_group == 2].views.to_numpy()
+
+ctr1, ctr2 = bootstrap(likes1, views1, likes2, views2)
+
+sns.histplot(ctr1)
+sns.histplot(ctr2)
+
+#Построим гистограмму разности глобальных CTR групп 1 и 2
+sns.histplot(ctr2 - ctr1)
+
+"""Вывод: распределения, полученные Пуассоновским бутстрепом, показали, что глобальные значения исследуемой метрики не пересекаются. 
+По гистограмме разности мы видим, что новый алгоритм рекомендаций постов привел к уменьшению CTR 
+(гистограмма "CTR группы 2 - CTR группы 1" находится в отрицательной области и не имеет значений в нуле)."""
+
+#t-тест на сглаженном ctr
+# функция сглаживания
+def get_smothed_ctr(user_likes, user_views, global_ctr, alpha):
+    smothed_ctr = (user_likes + alpha * global_ctr) / (user_views + alpha)
+    return smothed_ctr
+
+# общегрупповые CTR
+global_ctr_1 = df[df.exp_group == 1].likes.sum()/df[df.exp_group == 1].views.sum()
+global_ctr_2 = df[df.exp_group == 2].likes.sum()/df[df.exp_group == 2].views.sum()
+
+# распределение "сглаженных" CTR группы 1
+group1 = df[df.exp_group == 1].copy()
+group1['smothed_ctr'] = df.apply(
+    lambda x: get_smothed_ctr(x['likes'], x['views'], global_ctr_1, 5), axis=1)
+
+sns.distplot(group1.smothed_ctr, 
+             kde = False)
+             
+# распределение "сглаженных" CTR группы 2
+group2 = df[df.exp_group == 2].copy()
+group2['smothed_ctr'] = df.apply(
+    lambda x: get_smothed_ctr(x['likes'], x['views'], global_ctr_2, 5), axis=1)
+sns.distplot(group2.smothed_ctr, 
+             kde = False)
+             
+# t-test
+stats.ttest_ind(group1['smothed_ctr'],
+               group2['smothed_ctr'],
+               equal_var=False)
+#Ttest_indResult(statistic=2.2841320431616983, pvalue=0.0223769815558559)
+
+"""Вывод: метод "сглаженного" CTR не решил проблему ненормального распредления группы 2. 
+Применение t-теста с методом "сглаженного" CTR не имеет смысла."""
+
+#Бакетное преобразование
+# поделим пользователей на 50 бакетов. Воспользуемся Clickhouse и методом хэширования с "солью"
+q = """
+
+SELECT exp_group, bucket,
+    sum(likes)/sum(views) as bucket_ctr,
+    quantileExact(0.9)(ctr) as ctr9
+FROM (SELECT exp_group, 
+        xxHash64(user_id)%50 as bucket,
+        user_id,
+        sum(action = 'like') as likes,
+        sum(action = 'view') as views,
+        likes/views as ctr
+    FROM {db}.feed_actions 
+    WHERE toDate(time) between '2022-11-02' and '2022-11-08'
+        and exp_group in (1,2)
+    GROUP BY exp_group, bucket, user_id)
+GROUP BY exp_group, bucket
+"""
+
+df_buckets = ph.read_clickhouse(q, connection=connection)
+df_buckets.head(5)
+
+# распределение средних значений бакетных CTR в группе 1
+sns.histplot(df_buckets[df_buckets.exp_group == 1].bucket_ctr)
+
+# распределение средних значений бакетных CTR в группе 2
+sns.histplot(df_buckets[df_buckets.exp_group == 2].bucket_ctr)
+
+stats.ttest_ind(df_buckets[df_buckets.exp_group == 1].bucket_ctr, 
+                   df_buckets[df_buckets.exp_group == 2].bucket_ctr, 
+                   equal_var = False)
+#Ttest_indResult(statistic=5.668234732053979, pvalue=3.4455951649945907e-07)
+
+#Применили t-test, т.к. распределение в группе 1 близко к нормальному и в группе 2 похоже на нормальное                   
+[df_buckets[df_buckets.exp_group == 1].bucket_ctr.mean(), df_buckets[df_buckets.exp_group == 2].bucket_ctr.mean()]
+#[0.20812170724336013, 0.19825944666552928]
+
+#Вывод: среднее значение бакетных CTR в тестовой группе меньше, чем в контрольной
+
+stats.mannwhitneyu(df_buckets[df_buckets.exp_group == 1].bucket_ctr, 
+                   df_buckets[df_buckets.exp_group == 2].bucket_ctr, 
+                   alternative = 'two-sided')
+
+A_gt_B_buckets = 0
+for _ in range(10000):
+    A_gt_B_buckets+= df_buckets[df_buckets.exp_group == 1].bucket_ctr.sample().values[0] > df_buckets[df_buckets.exp_group == 2].bucket_ctr.sample().values[0]
+    
+print('В', A_gt_B_buckets/100, '% случаев A > B.')
+#В 79.84 % случаев A > B.
+
+#Вывод: тест Манна-Уитни аналогично t-test'у подтвердил, что применение нового алгоритма снижает целевую метрику CTR
+
+"""Выводы исследования:
+
+1. Мы провели исследование целевой метрики CTR в группах 1 и 2 следующими методами: t-тест, тест Манна-Уитни, 
+Пуассоновский бутстреп, t-тест на сглаженном ctr (α=5), а также t-тест и тест Манна-Уитни поверх бакетного преобразования.
+Методы, отработавшие корректно, показали снижение целевой метрики в группе 
+2. В связи с этим мы не рекомендуем выкатывать новый алгоритм на всю аудиторию ленты
+3. Рекомендуем обратить внимание на сегменты, CTR которых вырос в treatment-группе (правый горб двугорбого распределения)
+и проанализировать возможные причины роста CTR. """
