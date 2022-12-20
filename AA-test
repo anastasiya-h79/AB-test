@@ -1,0 +1,129 @@
+"""Проверка корректности работы системы сплитования. АА-тест
+
+Необходимо убедиться, что наша система корректно разбивает пользователей на группы, и ключевая метрика не отличается между группами не только в конкретно нашем АА-тесте, но и в целом. Только если группы до нашего воздействия были "одинаковыми", мы позволим себе утверждать, что возникшее после воздействия отличие вызвано этим воздействием.
+
+У нас есть данные АА-теста с 26 сентября по 2 октября 2022 года. Нужно сделать симуляцию, как будто мы провели 10000 АА-тестов. На каждой итерации сформируем подвыборки без повторения в 500 юзеров из 2 и 3 экспериментальной группы и проведём сравнение этих подвыборок t-критерием Стьюдента.
+
+Нулевая гипотеза H0: μ1​=μ2
+
+Альтернативная гипотеза H1: μ1 <> μ2
+
+Принятый уровень значимости: 5%
+
+Описание данных
+
+feed_actions — таблица с событиями из ленты новостей
+
+Поля:
+
+user_id (UINT32) — идентификатор пользователя
+post_id (UINT32) — индетификатор поста
+action (STRING) — событие (просмотр "view" или лайк "like")
+time (DATETIME) — дата и время события
+gender (INT8) — пол пользователя (мужской 1 или женский 0)
+age (INT16) — возраст пользователя
+country (STRING) — страна пользователя на английском
+city (STRING) — город пользователя на английском
+os (STRING) — операционная система устройства пользователя (Android/iOS)
+source (STRING) — источник трафика (organic/ads)
+exp_group (INT8) — группа теста (0, 1, 2, 3)
+"""
+
+#импортируем библиотеки
+
+import pandas as pd
+import pandahouse as ph
+import seaborn as sns
+import scipy as sp
+import numpy as np
+
+# Данные находятся в Clickhouse. Подключаемся к ней и импортируем данные
+
+connection = {'host': 'http://clickhouse.beslan.pro:8080',
+                      'database':'simulator',
+                      'user':'student', 
+                      'password':'dpo_python_2020'
+                     }
+
+q = """
+SELECT exp_group, 
+    user_id,
+    sum(action = 'like') as likes,
+    sum(action = 'view') as views,
+    likes/views as ctr
+FROM simulator_20221020.feed_actions 
+WHERE toDate(time) between '2022-09-26' and '2022-10-02'
+    and exp_group in (2,3)
+GROUP BY exp_group, user_id
+"""
+
+df = ph.read_clickhouse(q, connection=connection)
+
+df.groupby('exp_group').count()
+
+df.groupby('user_id', as_index=False)\
+    .agg({'exp_group': 'nunique'})['exp_group']\
+    .unique()
+    
+#В каждую группу попало около 8.5 тыс. пользователей. Схожие размеры групп - то, что нам нужно для теста. 
+#Пользователи в каждой группе уникальны. Нет таких, которые присутствуют сразу в обоих группах.
+
+# Посмотрим на целевые показатели CTR в экспериментальных группах 2 и 3
+
+sns.set(rc={'figure.figsize':(11.7,8.27)})
+
+groups = sns.histplot(data = df, 
+              x='ctr', 
+              hue='exp_group', 
+              palette = ['r', 'b'],
+              alpha=0.5,
+              kde=False)
+              
+df[df['exp_group'] == 2]['ctr'].mean()
+#0.21824612493721798
+
+df[df['exp_group'] == 3]['ctr'].mean()
+#0.21916104654193863
+
+#"На глаз" мы не видим существенных различий в CTR 2-1 и 3-й экспериментальных групп. Средние значения CTR также похожи.
+
+# Проведем АА-тест без семплирования
+
+sp.stats.ttest_ind(df[df.exp_group == 2].ctr,
+                df[df.exp_group == 3].ctr,
+                equal_var=False)
+#Ttest_indResult(statistic=-0.7393597924958364, pvalue=0.45969873156476293)
+
+#P-значение не меньше уровня значимости, отвергнуть нулевую гипотезу о равенстве средних не удаётся
+
+"""Создадим подвыборки в 500 уникальных пользователей из 2 и 3 экспериментальной группы. 
+Сравним их СTR с помощью t-критерия Стьюдента. 
+Проделаем это 10 000 раз и построим гистограмму распределения полученных p-значений."""
+
+p_value_df=pd.DataFrame()
+shape=10000
+unique_users=500
+p_list=[]
+for _ in range(shape):
+    group_2=df[df.exp_group == 2].ctr.sample(unique_users,replace=False)
+    group_3=df[df.exp_group == 3].ctr.sample(unique_users,replace=False)
+    p_val=sp.stats.ttest_ind(group_2,
+                group_3,
+                equal_var=False)
+    p_list.append(p_val[1])
+
+p_value_df=pd.DataFrame(p_list,columns=['p_values'])
+
+groups = sns.histplot(data = p_value_df, 
+              x='p_values',  
+              palette = ['r', 'b'],
+              alpha=0.5,
+              kde=False)
+              
+perc_05=p_value_df.query('p_values<0.05').size /10_000*100
+print('Процент значений p_value ниже 0.05: ', perc_05,'%')
+#Процент значений p_value ниже 0.05:  4.9799999999999995 %
+
+"""Выводы: процент полученных p-values, оказавшихся менее 5%, составляет чуть более 4.9%. 
+Следовательно нулевая гипотеза будет отвергнута в пользу тестовой в 4% экспериментов. 
+Из этого мы делаем вывод, что система сплитования работает корректно."""
