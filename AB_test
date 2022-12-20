@@ -20,10 +20,10 @@ import seaborn as sns
 import numpy as np
 from scipy import stats
 
-connection = {"host": "https://clickhouse.lab.karpov.courses",
-             "database": "simulator_20221120",
-             "user": "student",
-             "password": "dpo_python_2020"}
+connection = {"host": " ",
+             "database": " ",
+             "user": " ",
+             "password": " "}
 
 query = '''
 SELECT exp_group, 
